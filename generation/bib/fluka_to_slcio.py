@@ -19,6 +19,7 @@ parser.add_argument('--pdgs', metavar='ID',  help='PDG IDs of particles to be in
 parser.add_argument('--nopdgs', metavar='ID',  help='PDG IDs of particles to be excluded', type=int, default=None, nargs='+')
 parser.add_argument('--ne_min', metavar='E',  help='Minimum energy of accepted neutrons [GeV]', type=float, default=None)
 parser.add_argument('--t_max', metavar='T',  help='Maximum time of accepted particles [ns]', type=float, default=None)
+parser.add_argument('--corr',  help='Oversample while keeping particle correlations', type=float, default=None)
 
 args = parser.parse_args()
 
@@ -44,6 +45,13 @@ def bytes_from_file(filename):
 				return
 			yield chunk
 
+def uniform_oversample(maxP, dPhis, _pos, _currPos_mu):
+    dPhis[1:maxP] = np.random.uniform(0, 2 * math.pi, maxP - 1)
+    
+def correlated_oversample(maxP, dPhis, pos, currPos_mu):
+	if pos != currPos_mu:
+		dPhis[1:maxP] = np.random.uniform(0, 2 * math.pi, maxP - 1)
+
 # Binary format of a single entry
 line_dt=np.dtype([
 	('fid',  np.int32),
@@ -58,14 +66,7 @@ line_dt=np.dtype([
 	('time', np.float64),
 	('x_mu', np.float64),
 	('y_mu', np.float64),
-	('z_mu', np.float64),
-	('x_mo', np.float64),
-	('y_mo', np.float64),
-	('z_mo', np.float64),
-	('px_mo', np.float64),
-	('py_mo', np.float64),
-	('pz_mo', np.float64),
-	('age_mo', np.float64)
+	('z_mu', np.float64)
 ])
 
 ######################################## Start of the processing
@@ -103,11 +104,12 @@ nLines = 0
 nEvents = 0
 col = None
 evt = None
+nPar = 0
 
 # Reading the complete files
 for iF, file_in in enumerate(args.files_in):
 	if args.max_lines and nLines >= args.max_lines:
-			break
+		break
 	# Creating the LCIO event and collection
 	if nEventFiles == 0:
 		col = IMPL.LCCollectionVec(EVENT.LCIO.MCPARTICLE)
@@ -115,6 +117,16 @@ for iF, file_in in enumerate(args.files_in):
 
 		evt.setEventNumber(nEvents)
 		evt.addCollection(col, 'MCParticle')
+  
+	# Keeping track of position for correlation
+	currPos_mu = ()
+	# Max particles and delta Phi for clones
+	maxP = int(np.ceil(args.normalization))
+	dPhis = np.zeros(maxP)
+ 
+	# Oversample function
+	dPhiGeneration = correlated_oversample if args.corr else uniform_oversample
+ 
 	# Looping over particles from the file
 	for iL, data in enumerate(bytes_from_file(file_in)):
 		if args.max_lines and nLines >= args.max_lines:
@@ -128,6 +140,8 @@ for iF, file_in in enumerate(args.files_in):
 			'cx', 'cy', 'cz',
 			'time'
 		])
+  
+		dPhiGeneration(maxP, dPhis, currPos_mu, (x,y,z))
 
 		# Converting FLUKA ID to PDG ID
 		try:
@@ -136,6 +150,7 @@ for iF, file_in in enumerate(args.files_in):
 			print(f'WARNING: Unknown PDG ID for FLUKA ID: {fid}')
 			continue
 
+		nPar += 1
 		# Converting the absolute time of the particle [s -> ns]
 		t = time * 1e9
 
@@ -143,7 +158,6 @@ for iF, file_in in enumerate(args.files_in):
 		x = x * 10
 		y = y * 10
 		z = z * 10
-
 		# Skipping if particle's time is greater than allowed
 		if args.t_max is not None and t > args.t_max:
 			continue
@@ -190,7 +204,7 @@ for iF, file_in in enumerate(args.files_in):
 			p = IMPL.MCParticleImpl(particle)
 			# Rotating position and momentum vectors by a random angle in Phi
 			if nP > 1:
-				dPhi = random.random() * math.pi * 2
+				dPhi = dPhis[iP] 
 				co = math.cos(dPhi)
 				si = math.sin(dPhi)
 				pos[0] = co * x - si * y
@@ -211,4 +225,5 @@ for iF, file_in in enumerate(args.files_in):
 		print(f'Wrote event: {nEvents:d} with {col.getNumberOfElements()} particles')
 
 print(f'Wrote {nEvents:d} events to file: {args.file_out:s}')
+print(f'Number of lines in input file: {nLines}, number of particles with valid FLUKA ID to PDG ID: {nPar}')
 wrt.close()
